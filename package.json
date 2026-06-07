@@ -1,0 +1,19 @@
+{
+	"name": "obs-sqlite-md",
+	"version": "0.1.0",
+	"description": "Obsidian plugin: SQLite query results as markdown tables",
+	"main": "main.js",
+	"scripts": {
+		"dev": "node esbuild.config.mjs",
+		"build": "node esbuild.config.mjs production"
+	},
+	"devDependencies": {
+		"@types/node": "^22.0.0",
+		"esbuild": "^0.25.0",
+		"obsidian": "latest",
+		"typescript": "^5.7.0"
+	},
+	"dependencies": {
+		"sql.js": "^1.14.1"
+	}
+}

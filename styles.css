@@ -1,0 +1,52 @@
+.obs-sqlite-md-table {
+	width: 100%;
+	border-collapse: collapse;
+	margin: 0.5em 0;
+}
+
+.obs-sqlite-md-table th,
+.obs-sqlite-md-table td {
+	border: 1px solid var( --background-modifier-border );
+	padding: 4px 8px;
+	text-align: left;
+}
+
+.obs-sqlite-md-table th {
+	background-color: var( --background-secondary );
+	font-weight: 600;
+}
+
+.obs-sqlite-md-table tbody tr:hover {
+	background-color: var( --background-secondary );
+}
+
+.obs-sqlite-md-help-title {
+	font-weight: 600;
+	margin-bottom: 2px;
+}
+
+.obs-sqlite-md-help {
+	color: var( --text-muted );
+	font-size: 0.9em;
+	padding: 6px 10px;
+	border-left: 3px solid var( --interactive-accent );
+	background-color: var( --background-secondary );
+	border-radius: 3px;
+}
+
+.obs-sqlite-md-footer td {
+	font-size: 0.75em;
+	color: var( --text-muted );
+	text-align: center;
+	border-top: 2px solid var( --background-modifier-border );
+	padding: 6px 8px;
+}
+
+.obs-sqlite-md-actions {
+	margin-top: 4px;
+}
+
+.obs-sqlite-md-actions button {
+	font-size: 0.8em;
+	cursor: pointer;
+}
