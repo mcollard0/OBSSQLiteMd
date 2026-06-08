@@ -16,6 +16,14 @@ ORDER BY salary DESC;
 ```
 ````
 
+Or use an ODBC-style connection string with an `ObsSync` block:
+
+````markdown
+```ObsSync
+DRIVER=sqlite;DATABASE=/var/lib/jellyfin/data/jellyfin.db;QUERY=SELECT name, department, salary FROM employees WHERE department = 'Engineering' ORDER BY salary DESC
+```
+````
+
 Switch to **reading view** — the code block is replaced with a rendered table:
 
 | name | department | salary |
@@ -27,7 +35,9 @@ Switch to **reading view** — the code block is replaced with a rendered table:
 
 A footer row shows the database filename, when the data was retrieved, and the row count.
 
-## Block Format
+## Block Formats
+
+### `sql` / `sqlite`
 
 ```
 db: /absolute/path/to/database.db
@@ -37,6 +47,16 @@ SELECT ...;
 - **`db:`** — path to the SQLite database file. Absolute paths or vault-relative paths.
 - **Query** — any read-only SQL: `SELECT`, `WITH ... SELECT`, or `EXPLAIN QUERY PLAN`.
 - Write operations (`INSERT`, `UPDATE`, `DELETE`, `DROP`, etc.) are blocked.
+
+### `ObsSync` (ODBC-style)
+
+```
+DRIVER=sqlite;DATABASE=/absolute/path/to/database.db;QUERY=SELECT ...
+```
+
+- **`DRIVER=`** — optional, defaults to `sqlite`. Currently only `sqlite` is supported.
+- **`DATABASE=`** — path to the SQLite database file. Absolute paths or vault-relative paths.
+- **`QUERY=`** — must be last; its value extends to end of the block, so semicolons inside the SQL are safe.
 
 ## Features
 
@@ -98,7 +118,7 @@ npm run dev    # watch mode — rebuilds on file changes
 - Uses [sql.js](https://github.com/sql-js/sql.js) v1.14+ — SQLite compiled to WebAssembly via Emscripten.
 - The WASM binary (~644 KB) is embedded into `main.js` at build time. No separate `.wasm` file to manage.
 - Databases are read into memory as a `Uint8Array`. Large databases (hundreds of MB) will use proportional memory.
-- Registers both `sql` and `sqlite` as code block languages.
+- Registers `sql`, `sqlite`, and `ObsSync` as code block languages.
 
 ## License
 
