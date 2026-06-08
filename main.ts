@@ -11,6 +11,7 @@ interface ParsedBlock {
 	dbPath: string;
 	query: string;
 	cached: CachedResult | null;
+	refreshMode: 'auto' | 'manual';
 }
 
 interface CachedResult {
@@ -19,6 +20,37 @@ interface CachedResult {
 	dbName: string;
 	timestamp: string;
 	rowCount: number;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Comment parser — extracts REFRESH: and CACHE: from block comments  */
+/*  Pipe is an optional separator. Example formats in a code block:    */
+/*    REFRESH:MANUAL | CACHE:{json}                                    */
+/*    REFRESH:AUTO                                                     */
+/*    CACHE:{json}              (backward compat — implies AUTO)       */
+/* ------------------------------------------------------------------ */
+interface ParsedComment {
+	refreshMode: 'auto' | 'manual';
+	cached: CachedResult | null;
+	raw: string | null; // the full comment match to strip
+}
+
+function parseComment( source: string ): ParsedComment {
+	const m = source.match( /\/\*\s*([\s\S]*?)\*\// );
+	if ( !m ) return { refreshMode: 'auto', cached: null, raw: null };
+	const inner = m[1];
+
+	let refreshMode: 'auto' | 'manual' = 'auto';
+	const rm = inner.match( /\bREFRESH:\s*(AUTO(?:MATIC)?|MANUAL)\b/i );
+	if ( rm ) refreshMode = rm[1].toUpperCase().startsWith( 'AUTO' ) ? 'auto' : 'manual';
+
+	let cached: CachedResult | null = null;
+	const ci = inner.search( /\bCACHE:/i );
+	if ( ci >= 0 ) {
+		try { cached = JSON.parse( inner.slice( inner.indexOf( ':', ci ) + 1 ).trim() ); } catch { /* ignore */ }
+	}
+
+	return { refreshMode, cached, raw: m[0] };
 }
 
 /* ------------------------------------------------------------------ */
@@ -31,18 +63,10 @@ interface CachedResult {
 /*  ```                                                                */
 /* ------------------------------------------------------------------ */
 function parseBlock( source: string ): ParsedBlock | null {
-	let cached: CachedResult | null = null;
+	const { refreshMode, cached, raw } = parseComment( source );
 
-	/* Extract and strip the CACHE comment */
-	const cacheMatch = source.match( /\/\*\s*CACHE:(.*?)\*\//s );
-	if ( cacheMatch ) {
-		try {
-			cached = JSON.parse( cacheMatch[1].trim() );
-		} catch { /* ignore bad cache */ }
-	}
-
-	/* Remove the cache comment before parsing db/query lines */
-	const clean = cacheMatch ? source.replace( cacheMatch[0], "" ) : source;
+	/* Remove the comment before parsing db/query lines */
+	const clean = raw ? source.replace( raw, "" ) : source;
 	const lines = clean.trim().split( "\n" );
 	let dbPath = "";
 	const queryLines: string[] = [];
@@ -59,7 +83,7 @@ function parseBlock( source: string ): ParsedBlock | null {
 
 	const query = queryLines.join( " " ).trim();
 	if ( !dbPath || !query ) return null;
-	return { dbPath, query, cached };
+	return { dbPath, query, cached, refreshMode };
 }
 
 /* ------------------------------------------------------------------ */
@@ -67,17 +91,8 @@ function parseBlock( source: string ): ParsedBlock | null {
 /*  DRIVER=sqlite;DATABASE=/path/to/file.db;QUERY=SELECT ...           */
 /* ------------------------------------------------------------------ */
 function parseOdbcBlock( source: string ): ParsedBlock | null {
-	let cached: CachedResult | null = null;
-
-	/* Extract and strip the CACHE comment */
-	const cacheMatch = source.match( /\/\*\s*CACHE:(.*?)\*\//s );
-	if ( cacheMatch ) {
-		try {
-			cached = JSON.parse( cacheMatch[1].trim() );
-		} catch { /* ignore bad cache */ }
-	}
-
-	const clean = ( cacheMatch ? source.replace( cacheMatch[0], "" ) : source ).trim();
+	const { refreshMode, cached, raw } = parseComment( source );
+	const clean = ( raw ? source.replace( raw, "" ) : source ).trim();
 
 	/* QUERY= value extends to end of content (SQL can contain semicolons) */
 	const queryKeyIdx = clean.search( /\bQUERY\s*=/i );
@@ -95,7 +110,7 @@ function parseOdbcBlock( source: string ): ParsedBlock | null {
 
 	const dbPath = params[ "DATABASE" ] ?? "";
 	if ( !dbPath || !query ) return null;
-	return { dbPath, query, cached };
+	return { dbPath, query, cached, refreshMode };
 }
 
 /* ------------------------------------------------------------------ */
@@ -224,14 +239,15 @@ export default class ObsSQLiteMdPlugin extends Plugin {
 	/* -------------------------------------------------------------- */
 	/*  Write CACHE comment into the code block in the note file       */
 	/* -------------------------------------------------------------- */
-	private async writeCache( ctx: MarkdownPostProcessorContext, cached: CachedResult ): Promise<void> {
+	private async writeCache( ctx: MarkdownPostProcessorContext, cached: CachedResult, refreshMode: 'auto' | 'manual' ): Promise<void> {
 		const sectionInfo = ctx.getSectionInfo( ctx.el );
 		if ( !sectionInfo ) return;
 
 		const file = this.app.vault.getFileByPath( ctx.sourcePath );
 		if ( !file ) return;
 
-		const cacheComment = `/* CACHE:${JSON.stringify( cached )} */`;
+		const refreshPart = refreshMode === 'manual' ? 'REFRESH:MANUAL | ' : '';
+		const cacheComment = `/* ${refreshPart}CACHE:${JSON.stringify( cached )} */`;
 
 		await this.app.vault.process( file, ( content ) => {
 			const lines = content.split( "\n" );
@@ -264,7 +280,7 @@ export default class ObsSQLiteMdPlugin extends Plugin {
 	/* -------------------------------------------------------------- */
 	/*  Core render logic (shared by all block formats)               */
 	/* -------------------------------------------------------------- */
-	private async renderParsed( parsed: ParsedBlock, el: HTMLElement, ctx: MarkdownPostProcessorContext ): Promise<void> {
+	private async renderParsed( parsed: ParsedBlock, el: HTMLElement, ctx: MarkdownPostProcessorContext, forceRefresh = false ): Promise<void> {
 		if ( !isReadOnly( parsed.query ) ) {
 			el.createEl( "p", { text: "🔒 Read-only queries only. Supported: SELECT, WITH...SELECT, EXPLAIN.", cls: "obs-sqlite-md-help" } );
 			return;
@@ -279,6 +295,24 @@ export default class ObsSQLiteMdPlugin extends Plugin {
 					() => { new Notice( "📱 Open on desktop to refresh." ); } );
 			} else {
 				el.createEl( "p", { text: "📱 Open this note on desktop first to populate the cache.", cls: "obs-sqlite-md-help" } );
+			}
+			return;
+		}
+
+		/* Manual refresh mode: show cache without querying unless 🔄 was clicked */
+		if ( parsed.refreshMode === 'manual' && !forceRefresh ) {
+			if ( parsed.cached ) {
+				renderTable( el, parsed.cached.columns, parsed.cached.rows,
+					parsed.cached.dbName, parsed.cached.timestamp, true, async () => {
+						el.empty();
+						await this.renderParsed( parsed, el, ctx, true );
+					} );
+			} else {
+				const msg = el.createEl( "p", { cls: "obs-sqlite-md-help" } );
+				msg.appendText( "🗄️ Manual refresh — click " );
+				const btn = msg.createEl( "span", { text: "🔄", cls: "obs-sqlite-md-footer-btn" } );
+				btn.addEventListener( "click", async () => { el.empty(); await this.renderParsed( parsed, el, ctx, true ); } );
+				msg.appendText( " to load data." );
 			}
 			return;
 		}
@@ -336,7 +370,7 @@ export default class ObsSQLiteMdPlugin extends Plugin {
 					timestamp: now,
 					rowCount: result.values.length,
 				};
-				this.writeCache( ctx, cached ).catch( ( err ) => {
+				this.writeCache( ctx, cached, parsed.refreshMode ).catch( ( err ) => {
 					console.warn( "obs-sqlite-md: cache write failed", err );
 				} );
 			}
