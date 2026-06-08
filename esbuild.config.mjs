@@ -21,7 +21,7 @@ const wasmPlugin = {
 const context = await esbuild.context( {
 	entryPoints: [ "main.ts" ],
 	bundle: true,
-	external: [ "obsidian", "electron", "@codemirror/*", "@lezer/*", "fs", "path" ],
+	external: [ "obsidian", "electron", "@codemirror/*", "@lezer/*", "fs" ],
 	format: "cjs",
 	target: "es2020",
 	logLevel: "info",

@@ -50,3 +50,13 @@
 	font-size: 0.8em;
 	cursor: pointer;
 }
+
+.obs-sqlite-md-footer-btn {
+	cursor: pointer;
+	opacity: 0.75;
+	transition: opacity 0.15s;
+}
+
+.obs-sqlite-md-footer-btn:hover {
+	opacity: 1;
+}

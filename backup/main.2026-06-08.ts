@@ -1,5 +1,7 @@
 import { Plugin, Notice, FileSystemAdapter, MarkdownPostProcessorContext } from "obsidian";
 import initSqlJs, { Database } from "sql.js";
+import * as fs from "fs";
+import * as path from "path";
 
 // @ts-ignore — esbuild resolves this import at bundle time
 import sqlWasm from "sql.js/dist/sql-wasm.wasm";
@@ -63,42 +65,6 @@ function parseBlock( source: string ): ParsedBlock | null {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Parse ODBC-style block. Format (QUERY must be last):               */
-/*  DRIVER=sqlite;DATABASE=/path/to/file.db;QUERY=SELECT ...           */
-/* ------------------------------------------------------------------ */
-function parseOdbcBlock( source: string ): ParsedBlock | null {
-	let cached: CachedResult | null = null;
-
-	/* Extract and strip the CACHE comment */
-	const cacheMatch = source.match( /\/\*\s*CACHE:(.*?)\*\//s );
-	if ( cacheMatch ) {
-		try {
-			cached = JSON.parse( cacheMatch[1].trim() );
-		} catch { /* ignore bad cache */ }
-	}
-
-	const clean = ( cacheMatch ? source.replace( cacheMatch[0], "" ) : source ).trim();
-
-	/* QUERY= value extends to end of content (SQL can contain semicolons) */
-	const queryKeyIdx = clean.search( /\bQUERY\s*=/i );
-	const headerStr   = queryKeyIdx >= 0 ? clean.slice( 0, queryKeyIdx ) : clean;
-	const query       = queryKeyIdx >= 0 ? clean.slice( clean.indexOf( "=", queryKeyIdx ) + 1 ).trim() : "";
-
-	/* Parse DRIVER, DATABASE (and any other params) from the header portion */
-	const params: Record<string, string> = {};
-	for ( const part of headerStr.split( /\s*;\s*/ ) ) {
-		if ( !part.trim() ) continue;
-		const eq = part.indexOf( "=" );
-		if ( eq === -1 ) continue;
-		params[ part.slice( 0, eq ).trim().toUpperCase() ] = part.slice( eq + 1 ).trim();
-	}
-
-	const dbPath = params[ "DATABASE" ] ?? "";
-	if ( !dbPath || !query ) return null;
-	return { dbPath, query, cached };
-}
-
-/* ------------------------------------------------------------------ */
 /*  Security: only allow SELECT / WITH / EXPLAIN                       */
 /* ------------------------------------------------------------------ */
 const FORBIDDEN_RE = /\b(INSERT|UPDATE|DELETE|REPLACE|CREATE|ALTER|DROP|ATTACH|DETACH|PRAGMA|VACUUM|REINDEX|ANALYZE|BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE)\b/i;
@@ -116,9 +82,8 @@ function isReadOnly( sql: string ): boolean {
 /*  Path helpers                                                       */
 /* ------------------------------------------------------------------ */
 function resolveDbPath( rawPath: string, vaultRoot: string ): string {
-	const isAbs = rawPath.startsWith( "/" ) || /^[A-Za-z]:[\\/]/.test( rawPath );
-	if ( isAbs ) return rawPath;
-	return vaultRoot.replace( /\/+$/, "" ) + "/" + rawPath;
+	if ( path.isAbsolute( rawPath ) ) return rawPath;
+	return path.join( vaultRoot, rawPath );
 }
 
 /* ------------------------------------------------------------------ */
@@ -137,7 +102,7 @@ function toMarkdownTable( columns: string[], rows: any[][] ): string {
 /* ------------------------------------------------------------------ */
 /*  Render HTML table with metadata footer                             */
 /* ------------------------------------------------------------------ */
-function renderTable( el: HTMLElement, columns: string[], rows: any[][], dbName: string, timestamp: string, isStale: boolean, onRefresh: () => void ): string {
+function renderTable( el: HTMLElement, columns: string[], rows: any[][], dbName: string, timestamp: string, isStale: boolean ): string {
 	const table = el.createEl( "table" );
 	table.addClass( "obs-sqlite-md-table" );
 
@@ -162,11 +127,7 @@ function renderTable( el: HTMLElement, columns: string[], rows: any[][], dbName:
 	const footCell = footRow.createEl( "td" );
 	footCell.setAttribute( "colspan", String( columns.length ) );
 	const staleTag = isStale ? " ⚠️ cached" : "";
-	const folderBtn = footCell.createEl( "span", { text: "📂", cls: "obs-sqlite-md-footer-btn" } );
-	folderBtn.addEventListener( "click", onRefresh );
-	footCell.appendText( ` ${dbName} · 🕐 ${timestamp} · ${rows.length} row${rows.length !== 1 ? "s" : ""}${staleTag} ` );
-	const cycleBtn = footCell.createEl( "span", { text: "🔄", cls: "obs-sqlite-md-footer-btn" } );
-	cycleBtn.addEventListener( "click", onRefresh );
+	footCell.setText( `📂 ${dbName} · 🕐 ${timestamp} · ${rows.length} row${rows.length !== 1 ? "s" : ""}${staleTag}` );
 
 	const md = toMarkdownTable( columns, rows );
 
@@ -196,10 +157,6 @@ export default class ObsSQLiteMdPlugin extends Plugin {
 
 		this.registerMarkdownCodeBlockProcessor( "sqlite", async ( source, el, ctx ) => {
 			await this.renderSqlBlock( source, el, ctx );
-		} );
-
-		this.registerMarkdownCodeBlockProcessor( "ObsSync", async ( source, el, ctx ) => {
-			await this.renderOdbcBlock( source, el, ctx );
 		} );
 	}
 
@@ -262,9 +219,16 @@ export default class ObsSQLiteMdPlugin extends Plugin {
 	}
 
 	/* -------------------------------------------------------------- */
-	/*  Core render logic (shared by all block formats)               */
+	/*  Core render logic                                              */
 	/* -------------------------------------------------------------- */
-	private async renderParsed( parsed: ParsedBlock, el: HTMLElement, ctx: MarkdownPostProcessorContext ): Promise<void> {
+	private async renderSqlBlock( source: string, el: HTMLElement, ctx: MarkdownPostProcessorContext ): Promise<void> {
+		const parsed = parseBlock( source );
+		if ( !parsed ) {
+			el.createEl( "p", { text: "📖 SQL block format:", cls: "obs-sqlite-md-help-title" } );
+			el.createEl( "pre", { text: "db: /path/to/database.db\nSELECT column1, column2 FROM table WHERE condition;", cls: "obs-sqlite-md-help" } );
+			return;
+		}
+
 		if ( !isReadOnly( parsed.query ) ) {
 			el.createEl( "p", { text: "🔒 Read-only queries only. Supported: SELECT, WITH...SELECT, EXPLAIN.", cls: "obs-sqlite-md-help" } );
 			return;
@@ -272,33 +236,19 @@ export default class ObsSQLiteMdPlugin extends Plugin {
 
 		const vaultRoot = this.getVaultRoot();
 		if ( !vaultRoot ) {
-			/* Mobile: live queries unavailable — show cache if present */
-			if ( parsed.cached ) {
-				renderTable( el, parsed.cached.columns, parsed.cached.rows,
-					parsed.cached.dbName, parsed.cached.timestamp, true,
-					() => { new Notice( "📱 Open on desktop to refresh." ); } );
-			} else {
-				el.createEl( "p", { text: "📱 Open this note on desktop first to populate the cache.", cls: "obs-sqlite-md-help" } );
-			}
+			el.createEl( "p", { text: "💻 This plugin requires Obsidian Desktop to access local databases.", cls: "obs-sqlite-md-help" } );
 			return;
 		}
 
-		/* Desktop only from here — safe to require Node built-ins */
-		// eslint-disable-next-line @typescript-eslint/no-require-imports
-		const fs = require( "fs" ) as typeof import( "fs" );
-
 		const dbPath = resolveDbPath( parsed.dbPath, vaultRoot );
-		const dbName = dbPath.split( /[\\/]/ ).pop() || dbPath;
+		const dbName = path.basename( dbPath );
 		const dbAvailable = fs.existsSync( dbPath );
 
 		/* ---- DB unavailable: show cached result ---- */
 		if ( !dbAvailable ) {
 			if ( parsed.cached ) {
 				renderTable( el, parsed.cached.columns, parsed.cached.rows,
-					parsed.cached.dbName, parsed.cached.timestamp, true, async () => {
-						el.empty();
-						await this.renderParsed( parsed, el, ctx );
-					} );
+					parsed.cached.dbName, parsed.cached.timestamp, true );
 				return;
 			}
 			el.createEl( "p", { text: `📂 Database not found: ${dbPath}`, cls: "obs-sqlite-md-help-title" } );
@@ -323,10 +273,7 @@ export default class ObsSQLiteMdPlugin extends Plugin {
 			const now = new Date().toISOString().replace( "T", " " ).slice( 0, 19 );
 
 			for ( const result of results ) {
-				renderTable( el, result.columns, result.values, dbName, now, false, async () => {
-					el.empty();
-					await this.renderParsed( parsed, el, ctx );
-				} );
+				renderTable( el, result.columns, result.values, dbName, now, false );
 
 				/* Cache result back into the code block */
 				const cached: CachedResult = {
@@ -346,10 +293,7 @@ export default class ObsSQLiteMdPlugin extends Plugin {
 			if ( parsed.cached ) {
 				el.createEl( "p", { text: `📝 Query issue: ${err.message} — showing last cached result.`, cls: "obs-sqlite-md-help" } );
 				renderTable( el, parsed.cached.columns, parsed.cached.rows,
-					parsed.cached.dbName, parsed.cached.timestamp, true, async () => {
-						el.empty();
-						await this.renderParsed( parsed, el, ctx );
-					} );
+					parsed.cached.dbName, parsed.cached.timestamp, true );
 			} else {
 				el.createEl( "p", { text: `📝 Query issue: ${err.message}`, cls: "obs-sqlite-md-help-title" } );
 				el.createEl( "p", { text: "Check your SQL syntax. Column and table names are case-sensitive in some databases.", cls: "obs-sqlite-md-help" } );
@@ -357,39 +301,5 @@ export default class ObsSQLiteMdPlugin extends Plugin {
 		} finally {
 			if ( db ) db.close();
 		}
-	}
-
-	/* -------------------------------------------------------------- */
-	/*  Entry point for sql / sqlite code blocks                      */
-	/* -------------------------------------------------------------- */
-	private async renderSqlBlock( source: string, el: HTMLElement, ctx: MarkdownPostProcessorContext ): Promise<void> {
-		const parsed = parseBlock( source );
-		if ( !parsed ) {
-			el.createEl( "p", { text: "📖 SQL block format:", cls: "obs-sqlite-md-help-title" } );
-			el.createEl( "pre", { text: "db: /path/to/database.db\nSELECT column1, column2 FROM table WHERE condition;", cls: "obs-sqlite-md-help" } );
-			return;
-		}
-		await this.renderParsed( parsed, el, ctx );
-	}
-
-	/* -------------------------------------------------------------- */
-	/*  Entry point for ObsSync ODBC-style code blocks                */
-	/* -------------------------------------------------------------- */
-	private async renderOdbcBlock( source: string, el: HTMLElement, ctx: MarkdownPostProcessorContext ): Promise<void> {
-		/* Validate driver before full parse */
-		const driverMatch = source.match( /\bDRIVER\s*=\s*([^;\n]+)/i );
-		const driver = ( driverMatch ? driverMatch[1].trim() : "sqlite" ).toLowerCase();
-		if ( driver !== "sqlite" ) {
-			el.createEl( "p", { text: `🔌 Unsupported driver: "${driver}". Currently only DRIVER=sqlite is supported.`, cls: "obs-sqlite-md-help" } );
-			return;
-		}
-
-		const parsed = parseOdbcBlock( source );
-		if ( !parsed ) {
-			el.createEl( "p", { text: "📖 ObsSync block format:", cls: "obs-sqlite-md-help-title" } );
-			el.createEl( "pre", { text: "DRIVER=sqlite;DATABASE=/path/to/file.db;QUERY=SELECT * FROM table", cls: "obs-sqlite-md-help" } );
-			return;
-		}
-		await this.renderParsed( parsed, el, ctx );
 	}
 }
