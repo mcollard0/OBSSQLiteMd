@@ -12,6 +12,8 @@ interface ParsedBlock {
 	query: string;
 	cached: CachedResult | null;
 	refreshMode: 'auto' | 'manual';
+	refreshInterval: number | null; // ms; null = no timed refresh
+	refreshRaw: string | null;      // original value to write back (e.g. "15m", "MANUAL")
 }
 
 interface CachedResult {
@@ -24,25 +26,53 @@ interface CachedResult {
 
 /* ------------------------------------------------------------------ */
 /*  Comment parser — extracts REFRESH: and CACHE: from block comments  */
-/*  Pipe is an optional separator. Example formats in a code block:    */
-/*    REFRESH:MANUAL | CACHE:{json}                                    */
-/*    REFRESH:AUTO                                                     */
-/*    CACHE:{json}              (backward compat — implies AUTO)       */
+/*  Pipe is an optional separator. Supported REFRESH values:           */
+/*    REFRESH:MANUAL                  — user must click to refresh     */
+/*    REFRESH:AUTO / AUTOMATIC        — refresh on render (default)    */
+/*    REFRESH:15m, 30s, 2h, 1d, etc. — timed auto-refresh             */
 /* ------------------------------------------------------------------ */
 interface ParsedComment {
 	refreshMode: 'auto' | 'manual';
+	refreshInterval: number | null;
+	refreshRaw: string | null;
 	cached: CachedResult | null;
-	raw: string | null; // the full comment match to strip
+	raw: string | null;
+}
+
+function parseTimeMs( val: string ): number | null {
+	const m = val.match( /^(\d+(?:\.\d+)?)\s*(ms|milliseconds?|s|secs?|seconds?|m|mins?|minutes?|h|hrs?|hours?|d|days?)$/i );
+	if ( !m ) return null;
+	const n = parseFloat( m[1] );
+	const u = m[2].toLowerCase();
+	if ( u === 'ms' || u.startsWith( 'millisecond' ) ) return n;
+	if ( u === 's' || u === 'sec' || u === 'secs' || u.startsWith( 'second' ) ) return n * 1_000;
+	if ( u === 'm' || u === 'min' || u === 'mins' || u.startsWith( 'minute' ) ) return n * 60_000;
+	if ( u === 'h' || u === 'hr' || u === 'hrs' || u.startsWith( 'hour' ) ) return n * 3_600_000;
+	if ( u === 'd' || u.startsWith( 'day' ) ) return n * 86_400_000;
+	return null;
 }
 
 function parseComment( source: string ): ParsedComment {
 	const m = source.match( /\/\*\s*([\s\S]*?)\*\// );
-	if ( !m ) return { refreshMode: 'auto', cached: null, raw: null };
+	if ( !m ) return { refreshMode: 'auto', refreshInterval: null, refreshRaw: null, cached: null, raw: null };
 	const inner = m[1];
 
 	let refreshMode: 'auto' | 'manual' = 'auto';
-	const rm = inner.match( /\bREFRESH:\s*(AUTO(?:MATIC)?|MANUAL)\b/i );
-	if ( rm ) refreshMode = rm[1].toUpperCase().startsWith( 'AUTO' ) ? 'auto' : 'manual';
+	let refreshInterval: number | null = null;
+	let refreshRaw: string | null = null;
+	const rm = inner.match( /\bREFRESH:\s*([^\s|]+)/i );
+	if ( rm ) {
+		const rv = rm[1];
+		if ( /^auto(?:matic)?$/i.test( rv ) ) {
+			/* default — no change */
+		} else if ( /^manual$/i.test( rv ) ) {
+			refreshMode = 'manual';
+			refreshRaw = 'MANUAL';
+		} else {
+			const ms = parseTimeMs( rv );
+			if ( ms !== null ) { refreshInterval = ms; refreshRaw = rv; }
+		}
+	}
 
 	let cached: CachedResult | null = null;
 	const ci = inner.search( /\bCACHE:/i );
@@ -50,7 +80,7 @@ function parseComment( source: string ): ParsedComment {
 		try { cached = JSON.parse( inner.slice( inner.indexOf( ':', ci ) + 1 ).trim() ); } catch { /* ignore */ }
 	}
 
-	return { refreshMode, cached, raw: m[0] };
+	return { refreshMode, refreshInterval, refreshRaw, cached, raw: m[0] };
 }
 
 /* ------------------------------------------------------------------ */
@@ -63,7 +93,7 @@ function parseComment( source: string ): ParsedComment {
 /*  ```                                                                */
 /* ------------------------------------------------------------------ */
 function parseBlock( source: string ): ParsedBlock | null {
-	const { refreshMode, cached, raw } = parseComment( source );
+	const { refreshMode, cached, raw, refreshInterval, refreshRaw } = parseComment( source );
 
 	/* Remove the comment before parsing db/query lines */
 	const clean = raw ? source.replace( raw, "" ) : source;
@@ -83,7 +113,7 @@ function parseBlock( source: string ): ParsedBlock | null {
 
 	const query = queryLines.join( " " ).trim();
 	if ( !dbPath || !query ) return null;
-	return { dbPath, query, cached, refreshMode };
+	return { dbPath, query, cached, refreshMode, refreshInterval, refreshRaw };
 }
 
 /* ------------------------------------------------------------------ */
@@ -91,7 +121,7 @@ function parseBlock( source: string ): ParsedBlock | null {
 /*  DRIVER=sqlite;DATABASE=/path/to/file.db;QUERY=SELECT ...           */
 /* ------------------------------------------------------------------ */
 function parseOdbcBlock( source: string ): ParsedBlock | null {
-	const { refreshMode, cached, raw } = parseComment( source );
+	const { refreshMode, cached, raw, refreshInterval, refreshRaw } = parseComment( source );
 	const clean = ( raw ? source.replace( raw, "" ) : source ).trim();
 
 	/* QUERY= value extends to end of content (SQL can contain semicolons) */
@@ -110,7 +140,7 @@ function parseOdbcBlock( source: string ): ParsedBlock | null {
 
 	const dbPath = params[ "DATABASE" ] ?? "";
 	if ( !dbPath || !query ) return null;
-	return { dbPath, query, cached, refreshMode };
+	return { dbPath, query, cached, refreshMode, refreshInterval, refreshRaw };
 }
 
 /* ------------------------------------------------------------------ */
@@ -152,7 +182,7 @@ function toMarkdownTable( columns: string[], rows: any[][] ): string {
 /* ------------------------------------------------------------------ */
 /*  Render HTML table with metadata footer                             */
 /* ------------------------------------------------------------------ */
-function renderTable( el: HTMLElement, columns: string[], rows: any[][], dbName: string, timestamp: string, isStale: boolean, onRefresh: () => void ): string {
+function renderTable( el: HTMLElement, columns: string[], rows: any[][], dbName: string, timestamp: string, isStale: boolean, onRefresh: () => void, timerLabel?: string ): string {
 	const table = el.createEl( "table" );
 	table.addClass( "obs-sqlite-md-table" );
 
@@ -177,9 +207,10 @@ function renderTable( el: HTMLElement, columns: string[], rows: any[][], dbName:
 	const footCell = footRow.createEl( "td" );
 	footCell.setAttribute( "colspan", String( columns.length ) );
 	const staleTag = isStale ? " ⚠️ cached" : "";
+	const timerTag = timerLabel ? ` · ⏱️ ${timerLabel}` : "";
 	const folderBtn = footCell.createEl( "span", { text: "📂", cls: "obs-sqlite-md-footer-btn" } );
 	folderBtn.addEventListener( "click", onRefresh );
-	footCell.appendText( ` ${dbName} · 🕐 ${timestamp} · ${rows.length} row${rows.length !== 1 ? "s" : ""}${staleTag} ` );
+	footCell.appendText( ` ${dbName} · 🕐 ${timestamp} · ${rows.length} row${rows.length !== 1 ? "s" : ""}${staleTag}${timerTag} ` );
 	const cycleBtn = footCell.createEl( "span", { text: "🔄", cls: "obs-sqlite-md-footer-btn" } );
 	cycleBtn.addEventListener( "click", onRefresh );
 
@@ -239,14 +270,14 @@ export default class ObsSQLiteMdPlugin extends Plugin {
 	/* -------------------------------------------------------------- */
 	/*  Write CACHE comment into the code block in the note file       */
 	/* -------------------------------------------------------------- */
-	private async writeCache( ctx: MarkdownPostProcessorContext, cached: CachedResult, refreshMode: 'auto' | 'manual' ): Promise<void> {
+	private async writeCache( ctx: MarkdownPostProcessorContext, cached: CachedResult, refreshLabel: string | null ): Promise<void> {
 		const sectionInfo = ctx.getSectionInfo( ctx.el );
 		if ( !sectionInfo ) return;
 
 		const file = this.app.vault.getFileByPath( ctx.sourcePath );
 		if ( !file ) return;
 
-		const refreshPart = refreshMode === 'manual' ? 'REFRESH:MANUAL | ' : '';
+		const refreshPart = refreshLabel ? `${refreshLabel} | ` : '';
 		const cacheComment = `/* ${refreshPart}CACHE:${JSON.stringify( cached )} */`;
 
 		await this.app.vault.process( file, ( content ) => {
@@ -259,7 +290,7 @@ export default class ObsSQLiteMdPlugin extends Plugin {
 			let inCache = false;
 			for ( let i = startLine + 1; i < endLine; i++ ) {
 				const line = lines[i];
-				if ( line.trim().startsWith( "/* CACHE:" ) ) { inCache = true; }
+				if ( /^\/\*\s*(REFRESH:|CACHE:)/i.test( line.trim() ) ) { inCache = true; }
 				if ( !inCache ) { bodyLines.push( line ); }
 				if ( inCache && line.trim().endsWith( "*/" ) ) { inCache = false; }
 			}
@@ -360,7 +391,7 @@ export default class ObsSQLiteMdPlugin extends Plugin {
 				renderTable( el, result.columns, result.values, dbName, now, false, async () => {
 					el.empty();
 					await this.renderParsed( parsed, el, ctx );
-				} );
+				}, parsed.refreshInterval ? ( parsed.refreshRaw ?? undefined ) : undefined );
 
 				/* Cache result back into the code block */
 				const cached: CachedResult = {
@@ -370,9 +401,19 @@ export default class ObsSQLiteMdPlugin extends Plugin {
 					timestamp: now,
 					rowCount: result.values.length,
 				};
-				this.writeCache( ctx, cached, parsed.refreshMode ).catch( ( err ) => {
+				const refreshLabel = parsed.refreshRaw ? `REFRESH:${parsed.refreshRaw}` : null;
+				this.writeCache( ctx, cached, refreshLabel ).catch( ( err ) => {
 					console.warn( "obs-sqlite-md: cache write failed", err );
 				} );
+			}
+
+			/* Schedule timed auto-refresh if interval is set */
+			if ( parsed.refreshInterval ) {
+				window.setTimeout( async () => {
+					if ( !el.isConnected ) return;
+					el.empty();
+					await this.renderParsed( parsed, el, ctx );
+				}, parsed.refreshInterval );
 			}
 
 		} catch ( err: any ) {
