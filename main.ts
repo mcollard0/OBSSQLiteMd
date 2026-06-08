@@ -65,6 +65,42 @@ function parseBlock( source: string ): ParsedBlock | null {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Parse ODBC-style block. Format (QUERY must be last):               */
+/*  DRIVER=sqlite;DATABASE=/path/to/file.db;QUERY=SELECT ...           */
+/* ------------------------------------------------------------------ */
+function parseOdbcBlock( source: string ): ParsedBlock | null {
+	let cached: CachedResult | null = null;
+
+	/* Extract and strip the CACHE comment */
+	const cacheMatch = source.match( /\/\*\s*CACHE:(.*?)\*\//s );
+	if ( cacheMatch ) {
+		try {
+			cached = JSON.parse( cacheMatch[1].trim() );
+		} catch { /* ignore bad cache */ }
+	}
+
+	const clean = ( cacheMatch ? source.replace( cacheMatch[0], "" ) : source ).trim();
+
+	/* QUERY= value extends to end of content (SQL can contain semicolons) */
+	const queryKeyIdx = clean.search( /\bQUERY\s*=/i );
+	const headerStr   = queryKeyIdx >= 0 ? clean.slice( 0, queryKeyIdx ) : clean;
+	const query       = queryKeyIdx >= 0 ? clean.slice( clean.indexOf( "=", queryKeyIdx ) + 1 ).trim() : "";
+
+	/* Parse DRIVER, DATABASE (and any other params) from the header portion */
+	const params: Record<string, string> = {};
+	for ( const part of headerStr.split( /\s*;\s*/ ) ) {
+		if ( !part.trim() ) continue;
+		const eq = part.indexOf( "=" );
+		if ( eq === -1 ) continue;
+		params[ part.slice( 0, eq ).trim().toUpperCase() ] = part.slice( eq + 1 ).trim();
+	}
+
+	const dbPath = params[ "DATABASE" ] ?? "";
+	if ( !dbPath || !query ) return null;
+	return { dbPath, query, cached };
+}
+
+/* ------------------------------------------------------------------ */
 /*  Security: only allow SELECT / WITH / EXPLAIN                       */
 /* ------------------------------------------------------------------ */
 const FORBIDDEN_RE = /\b(INSERT|UPDATE|DELETE|REPLACE|CREATE|ALTER|DROP|ATTACH|DETACH|PRAGMA|VACUUM|REINDEX|ANALYZE|BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE)\b/i;
@@ -158,6 +194,10 @@ export default class ObsSQLiteMdPlugin extends Plugin {
 		this.registerMarkdownCodeBlockProcessor( "sqlite", async ( source, el, ctx ) => {
 			await this.renderSqlBlock( source, el, ctx );
 		} );
+
+		this.registerMarkdownCodeBlockProcessor( "ObsSync", async ( source, el, ctx ) => {
+			await this.renderOdbcBlock( source, el, ctx );
+		} );
 	}
 
 	onunload() {
@@ -219,16 +259,9 @@ export default class ObsSQLiteMdPlugin extends Plugin {
 	}
 
 	/* -------------------------------------------------------------- */
-	/*  Core render logic                                              */
+	/*  Core render logic (shared by all block formats)               */
 	/* -------------------------------------------------------------- */
-	private async renderSqlBlock( source: string, el: HTMLElement, ctx: MarkdownPostProcessorContext ): Promise<void> {
-		const parsed = parseBlock( source );
-		if ( !parsed ) {
-			el.createEl( "p", { text: "📖 SQL block format:", cls: "obs-sqlite-md-help-title" } );
-			el.createEl( "pre", { text: "db: /path/to/database.db\nSELECT column1, column2 FROM table WHERE condition;", cls: "obs-sqlite-md-help" } );
-			return;
-		}
-
+	private async renderParsed( parsed: ParsedBlock, el: HTMLElement, ctx: MarkdownPostProcessorContext ): Promise<void> {
 		if ( !isReadOnly( parsed.query ) ) {
 			el.createEl( "p", { text: "🔒 Read-only queries only. Supported: SELECT, WITH...SELECT, EXPLAIN.", cls: "obs-sqlite-md-help" } );
 			return;
@@ -301,5 +334,39 @@ export default class ObsSQLiteMdPlugin extends Plugin {
 		} finally {
 			if ( db ) db.close();
 		}
+	}
+
+	/* -------------------------------------------------------------- */
+	/*  Entry point for sql / sqlite code blocks                      */
+	/* -------------------------------------------------------------- */
+	private async renderSqlBlock( source: string, el: HTMLElement, ctx: MarkdownPostProcessorContext ): Promise<void> {
+		const parsed = parseBlock( source );
+		if ( !parsed ) {
+			el.createEl( "p", { text: "📖 SQL block format:", cls: "obs-sqlite-md-help-title" } );
+			el.createEl( "pre", { text: "db: /path/to/database.db\nSELECT column1, column2 FROM table WHERE condition;", cls: "obs-sqlite-md-help" } );
+			return;
+		}
+		await this.renderParsed( parsed, el, ctx );
+	}
+
+	/* -------------------------------------------------------------- */
+	/*  Entry point for ObsSync ODBC-style code blocks                */
+	/* -------------------------------------------------------------- */
+	private async renderOdbcBlock( source: string, el: HTMLElement, ctx: MarkdownPostProcessorContext ): Promise<void> {
+		/* Validate driver before full parse */
+		const driverMatch = source.match( /\bDRIVER\s*=\s*([^;\n]+)/i );
+		const driver = ( driverMatch ? driverMatch[1].trim() : "sqlite" ).toLowerCase();
+		if ( driver !== "sqlite" ) {
+			el.createEl( "p", { text: `🔌 Unsupported driver: "${driver}". Currently only DRIVER=sqlite is supported.`, cls: "obs-sqlite-md-help" } );
+			return;
+		}
+
+		const parsed = parseOdbcBlock( source );
+		if ( !parsed ) {
+			el.createEl( "p", { text: "📖 ObsSync block format:", cls: "obs-sqlite-md-help-title" } );
+			el.createEl( "pre", { text: "DRIVER=sqlite;DATABASE=/path/to/file.db;QUERY=SELECT * FROM table", cls: "obs-sqlite-md-help" } );
+			return;
+		}
+		await this.renderParsed( parsed, el, ctx );
 	}
 }
