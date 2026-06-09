@@ -167,6 +167,22 @@ function resolveDbPath( rawPath: string, vaultRoot: string ): string {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Local timestamp with timezone offset                               */
+/*  Output: "2026-06-08 15:54:20 +02:00" or "... UTC"                 */
+/* ------------------------------------------------------------------ */
+function localTimestamp(): string {
+	const d = new Date();
+	const pad = ( n: number ) => String( n ).padStart( 2, '0' );
+	const date = `${d.getFullYear()}-${pad( d.getMonth() + 1 )}-${pad( d.getDate() )}`;
+	const time = `${pad( d.getHours() )}:${pad( d.getMinutes() )}:${pad( d.getSeconds() )}`;
+	const offsetMin = -d.getTimezoneOffset(); // getTimezoneOffset() is negative east of UTC
+	if ( offsetMin === 0 ) return `${date} ${time} UTC`;
+	const sign = offsetMin > 0 ? '+' : '-';
+	const abs  = Math.abs( offsetMin );
+	return `${date} ${time} ${sign}${pad( Math.floor( abs / 60 ) )}:${pad( abs % 60 )}`;
+}
+
+/* ------------------------------------------------------------------ */
 /*  Markdown table string                                              */
 /* ------------------------------------------------------------------ */
 function toMarkdownTable( columns: string[], rows: any[][] ): string {
@@ -385,7 +401,7 @@ export default class ObsSQLiteMdPlugin extends Plugin {
 				return;
 			}
 
-			const now = new Date().toISOString().replace( "T", " " ).slice( 0, 19 );
+			const now = localTimestamp();
 
 			for ( const result of results ) {
 				renderTable( el, result.columns, result.values, dbName, now, false, async () => {
