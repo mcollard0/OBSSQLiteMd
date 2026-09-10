@@ -1,7 +1,7 @@
 import { Plugin, Notice, FileSystemAdapter, MarkdownPostProcessorContext } from "obsidian";
 import initSqlJs, { Database } from "sql.js";
 
-// @ts-ignore — esbuild resolves this import at bundle time
+// @ts-ignore -- esbuild resolves this import at bundle time
 import sqlWasm from "sql.js/dist/sql-wasm.wasm";
 
 /* ------------------------------------------------------------------ */
@@ -363,7 +363,7 @@ export default class ObsSQLiteMdPlugin extends Plugin {
 		}
 
 		/* Desktop only from here — safe to require Node built-ins */
-		// eslint-disable-next-line @typescript-eslint/no-require-imports
+		// eslint-disable-next-line @typescript-eslint/no-require-imports -- Node.js fs is required dynamically at runtime on desktop only to prevent mobile crashes
 		const fs = require( "fs" ) as typeof import( "fs" );
 
 		const dbPath = resolveDbPath( parsed.dbPath, vaultRoot );
