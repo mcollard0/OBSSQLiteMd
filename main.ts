@@ -250,7 +250,6 @@ export default class ObsSQLiteMdPlugin extends Plugin {
 	private sqlEngine: any = null;
 
 	async onload() {
-		console.log( "obs-sqlite-md: loading plugin" );
 
 		this.registerMarkdownCodeBlockProcessor( "sql", async ( source, el, ctx ) => {
 			await this.renderSqlBlock( source, el, ctx );
@@ -266,7 +265,6 @@ export default class ObsSQLiteMdPlugin extends Plugin {
 	}
 
 	onunload() {
-		console.log( "obs-sqlite-md: unloaded" );
 	}
 
 	private async getSqlEngine(): Promise<any> {
