@@ -1,7 +1,7 @@
 {
 	"id": "obs-sqlite-md",
 	"name": "SQLite to Markdown",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"minAppVersion": "1.5.0",
 	"description": "Render SQLite queries as markdown tables via fenced code blocks.",
 	"author": "Michael Collard",

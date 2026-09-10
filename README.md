@@ -1,4 +1,4 @@
-# OBSSQLiteMd
+# SQLite to Markdown
 
 An Obsidian plugin that runs SQLite queries against local databases and renders the results as tables in reading view. Write SQL in a fenced code block, get a live table.
 
